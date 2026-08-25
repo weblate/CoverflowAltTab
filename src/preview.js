@@ -66,6 +66,7 @@ export const Preview = GObject.registerClass({
         this._entered = false;
         this._effectCounts = {};
         this._destroying = false;
+        this._cleanedUp = false;
     }
 
     /**
@@ -115,6 +116,8 @@ export const Preview = GObject.registerClass({
     }
 
     addEffect(effect_class, constructor_argument, name, parameter_name, from_param_value, param_value, duration) {
+        if (this._destroying || this._cleanedUp)
+            return;
         duration = 0.99 * 1000.0 * duration;
         let effect_name = name + "-effect";
         let add_transition_name = effect_name + "-add";
@@ -134,6 +137,7 @@ export const Preview = GObject.registerClass({
             this.get_effect(effect_name)[parameter_name] = 1.0;
             this.add_transition(add_transition_name, transition);
             transition.connect('new-frame', (_timeline, _msecs) => {
+                if (this._destroying) return;
                 this.queue_redraw();
             });
         } else if (this._effectCounts[name] === 0) {
@@ -149,6 +153,7 @@ export const Preview = GObject.registerClass({
                 this.add_transition(add_transition_name, transition);
                 this._effectCounts[name] = 1;
                 transition.connect('new-frame', (_timeline, _msecs) => {
+                    if (this._destroying) return;
                     this.queue_redraw();
                 });
             }
@@ -176,6 +181,7 @@ export const Preview = GObject.registerClass({
                     this.get_effect(effect_name)[parameter_name] = 1.0;
                     this.add_transition(remove_transition_name, transition);
                     transition.connect("completed", (_trans) => {
+                        if (this._destroying) return;
                         this.remove_effect_by_name(effect_name);
                         this._effectCounts[name] = 0;
                     });
@@ -187,17 +193,19 @@ export const Preview = GObject.registerClass({
     }
 
     _pulse_highlight() {
-        if (this._highlight === null) return;
+        if (this._destroying || this._highlight === null) return;
         this._highlight.ease({
             opacity: 255,
             duration: 2000,
             mode: Clutter.AnimationMode.EASE_IN_OUT_QUINT,
             onComplete: () => {
+                if (this._destroying || this._highlight === null) return;
                 this._highlight.ease({
                     opacity: 80,
                     duration: 1400,
                     mode: Clutter.AnimationMode.EASE_IN_OUT_QUINT,
                     onComplete: () => {
+                        if (this._destroying || this._highlight === null) return;
                         this._pulse_highlight();
                     },
                 });
@@ -205,23 +213,58 @@ export const Preview = GObject.registerClass({
         });
     }
 
-    remove_highlight() {
+    remove_highlight(immediate = false) {
         if (this._highlight !== null) {
-            this._highlight.ease({
-                opacity: 0,
-                duration: 300,
-                mode: Clutter.AnimationMode.EASE_IN_OUT_QUINT,
-                onComplete: () => {
-                    if (this._highlight !== null) {
-                        this._highlight.destroy()
+            if (immediate || this._destroying) {
+                this._highlight.remove_all_transitions();
+                this._highlight.destroy();
+                this._highlight = null;
+            } else {
+                this._highlight.ease({
+                    opacity: 0,
+                    duration: 300,
+                    mode: Clutter.AnimationMode.EASE_IN_OUT_QUINT,
+                    onComplete: () => {
+                        if (this._destroying || this._highlight === null) return;
+                        this._highlight.destroy();
                         this._highlight = null;
-                    }
-                },
-            });
+                    },
+                });
+            }
         }
         if (this._flash !== null) {
+            this._flash.remove_all_transitions();
             this._flash.destroy();
             this._flash = null;
+        }
+    }
+
+    /**
+     * Stop all preview animations/effects and tear down child actors.
+     * Safe to call more than once; call before destroying the preview.
+     */
+    cleanup() {
+        if (this._cleanedUp)
+            return;
+        this._cleanedUp = true;
+        this._destroying = true;
+
+        this.remove_all_transitions();
+
+        for (let name of Object.keys(this._effectCounts)) {
+            let effect_name = `${name}-effect`;
+            if (this.get_effect(effect_name))
+                this.remove_effect_by_name(effect_name);
+        }
+        this._effectCounts = {};
+
+        this.remove_highlight(true);
+
+        if (this._application_icon_box !== null) {
+            if (this._icon !== null)
+                this._icon.remove_all_transitions();
+            this._application_icon_box.remove_all_transitions();
+            this._destroyApplicationIconBox();
         }
     }
 
@@ -232,7 +275,7 @@ export const Preview = GObject.registerClass({
     }
 
     vfunc_enter_event(_crossingEvent) {
-        if (this.switcher._animatingClosed || this._entered === true) {
+        if (this._destroying || this.switcher._animatingClosed || this._entered === true) {
             return Clutter.EVENT_PROPAGATE;
         }
         this._entered = true;
@@ -303,6 +346,7 @@ export const Preview = GObject.registerClass({
                     duration: 500,
                     mode: Clutter.AnimationMode.EASE_OUT_QUINT,
                     onComplete: () => {
+                        if (this._destroying) return;
                         this._pulse_highlight();
                     }
                 });
@@ -313,6 +357,8 @@ export const Preview = GObject.registerClass({
     }
 
     addIcon() {
+        if (this._destroying || this._cleanedUp)
+            return;
         const icon_size = BASE_ICON_SIZE;
         const target_size = this.switcher._settings.overlay_icon_size;
         let shortest_side_length = Math.min(this.width, this.height)
@@ -371,6 +417,7 @@ export const Preview = GObject.registerClass({
                 opacity: 255,
                 time: this.switcher._getRandomTime(),
                 onComplete:  () => {
+                    if (this._destroying || this._application_icon_box === null) return;
                     this.bind_property('opacity', this._application_icon_box, 'opacity',
                         GObject.BindingFlags.DEFAULT);
                 }
@@ -408,6 +455,8 @@ export const Preview = GObject.registerClass({
     }
 
     removeIcon(animation_time) {
+        if (this._destroying || this._cleanedUp)
+            return;
         if (this._icon !== null && !this._icon.removing) {
             this._icon.removing = true;
             if (this.switcher._iconFadeInOut) {
@@ -416,9 +465,8 @@ export const Preview = GObject.registerClass({
                     opacity: 0,
                     time: animation_time,
                     onComplete: () => {
-                        if (this._icon !== null) {
-                           this._destroyApplicationIconBox();
-                        }
+                        if (this._destroying || this._icon === null) return;
+                        this._destroyApplicationIconBox();
                     },
                 });
             }
@@ -433,9 +481,8 @@ export const Preview = GObject.registerClass({
                             scale_y: 0,
                             time: animation_time,
                             onComplete: () => {
-                                if (this._icon !== null) {
-                                    this._destroyApplicationIconBox();
-                                }
+                                if (this._destroying || this._icon === null) return;
+                                this._destroyApplicationIconBox();
                             },
                         });
                     }
@@ -445,8 +492,10 @@ export const Preview = GObject.registerClass({
     }
 
     _destroyApplicationIconBox() {
-        this._application_icon_box.destroy();
-        this._application_icon_box = null;
+        if (this._application_icon_box !== null) {
+            this._application_icon_box.destroy();
+            this._application_icon_box = null;
+        }
         this._application_inner_icon_box = null;
         this._icon = null;
     }
