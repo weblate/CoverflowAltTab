@@ -64,7 +64,7 @@ build:
 		-o ../build/
 
 $(POT_FILE): $(SRC_DIR)/*.js
-	xgettext ${SRC_DIR}/*.js -L JavaScript -o $@ --package-name=${UUID}
+	xgettext ${SRC_DIR}/*.js -L JavaScript --from-code=UTF-8 -o $@ --package-name=${UUID}
 
 translations: $(MO_FILES)
 
