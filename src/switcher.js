@@ -356,6 +356,8 @@ export class Switcher {
     }
 
     _addBackgroundEffects() {
+        if (this._destroyed || !this._previews)
+            return;
         for (let preview of this._previews) {
             if (this._settings.use_glitch_effect) {
                 if (preview.get_effect('glitch-effect') === null) {
@@ -380,15 +382,17 @@ export class Switcher {
     }
 
     _removeBackgroundEffects() {
-        if (this._previews !== null) {
-            for (let preview of this._previews) {
-                preview.removeEffect('desaturate', 'factor', 0.0, this._settings.animation_time);
-                preview.removeEffect('tint', 'blend', 0.0, this._settings.animation_time);
-                if (preview._effectCounts['glitch'] > 0) {
-                    preview._effectCounts['glitch'] -= 1;
-                    if (preview._effectCounts['glitch'] === 0) {
-                        preview.get_effect('glitch-effect').set_enabled(false);
-                    }
+        if (!this._previews)
+            return;
+        for (let preview of this._previews) {
+            if (preview._destroying || preview._cleanedUp)
+                continue;
+            preview.removeEffect('desaturate', 'factor', 0.0, this._settings.animation_time);
+            preview.removeEffect('tint', 'blend', 0.0, this._settings.animation_time);
+            if (preview._effectCounts['glitch'] > 0) {
+                preview._effectCounts['glitch'] -= 1;
+                if (preview._effectCounts['glitch'] === 0) {
+                    preview.get_effect('glitch-effect').set_enabled(false);
                 }
             }
         }

@@ -67,6 +67,47 @@ export const Preview = GObject.registerClass({
         this._effectCounts = {};
         this._destroying = false;
         this._cleanedUp = false;
+        this._bindings = [];
+    }
+
+    _trackBindProperty(sourceProp, target, targetProp, flags) {
+        let binding = this.bind_property(sourceProp, target, targetProp, flags);
+        if (binding)
+            this._bindings.push(binding);
+    }
+
+    _unbindAll() {
+        for (let binding of this._bindings) {
+            try {
+                binding.unbind();
+            } catch (_e) {
+                // Binding may already be gone if the target was destroyed.
+            }
+        }
+        this._bindings = [];
+    }
+
+    _stopEffectTransitions(effect_name) {
+        this.remove_transition(`${effect_name}-add`);
+        this.remove_transition(`${effect_name}-remove`);
+    }
+
+    removeAllEffectsImmediate() {
+        for (let name of Object.keys(this._effectCounts))
+            this._stopEffectTransitions(`${name}-effect`);
+
+        for (let name of ['desaturate', 'tint']) {
+            let effect_name = `${name}-effect`;
+            this._stopEffectTransitions(effect_name);
+            if (this.get_effect(effect_name))
+                this.remove_effect_by_name(effect_name);
+        }
+
+        if (this.get_effect('glitch-effect')) {
+            this.get_effect('glitch-effect').set_enabled(false);
+            this.remove_effect_by_name('glitch-effect');
+        }
+        this._effectCounts = {};
     }
 
     /**
@@ -128,13 +169,16 @@ export const Preview = GObject.registerClass({
         }
         if (this.get_transition(remove_transition_name) !== null) {
             this.remove_transition(remove_transition_name);
+            let effect = this.get_effect(effect_name);
+            if (!effect)
+                return;
             let transition = Clutter.PropertyTransition.new(property_transition_name);
             transition.progress_mode = Clutter.AnimationMode.LINEAR;
             transition.duration = duration;
             transition.remove_on_complete = true;
-            transition.set_from(this.get_effect(effect_name)[parameter_name]);
+            transition.set_from(effect[parameter_name]);
             transition.set_to(param_value);
-            this.get_effect(effect_name)[parameter_name] = 1.0;
+            effect[parameter_name] = 1.0;
             this.add_transition(add_transition_name, transition);
             transition.connect('new-frame', (_timeline, _msecs) => {
                 if (this._destroying) return;
@@ -163,6 +207,8 @@ export const Preview = GObject.registerClass({
     }
 
     removeEffect(name, parameter_name, value, duration) {
+        if (this._destroying || this._cleanedUp)
+            return;
         duration = 0.99 * 1000.0 * duration;
         let effect_name = name + "-effect";
         let add_transition_name = effect_name + "-add";
@@ -172,13 +218,18 @@ export const Preview = GObject.registerClass({
             if (this._effectCounts[name] === 1) {
                 this.remove_transition(add_transition_name);
                 if (this.get_transition(remove_transition_name) === null) {
+                    let effect = this.get_effect(effect_name);
+                    if (!effect) {
+                        this._effectCounts[name] = 0;
+                        return;
+                    }
                     let transition = Clutter.PropertyTransition.new(property_transition_name);
                     transition.progress_mode = Clutter.AnimationMode.LINEAR;
                     transition.duration = duration;
                     transition.remove_on_complete = true;
-                    transition.set_from(this.get_effect(effect_name)[parameter_name]);
+                    transition.set_from(effect[parameter_name]);
                     transition.set_to(value);
-                    this.get_effect(effect_name)[parameter_name] = 1.0;
+                    effect[parameter_name] = 1.0;
                     this.add_transition(remove_transition_name, transition);
                     transition.connect("completed", (_trans) => {
                         if (this._destroying) return;
@@ -249,14 +300,15 @@ export const Preview = GObject.registerClass({
         this._cleanedUp = true;
         this._destroying = true;
 
+        this._unbindAll();
         this.remove_all_transitions();
+        this.removeAllEffectsImmediate();
 
-        for (let name of Object.keys(this._effectCounts)) {
-            let effect_name = `${name}-effect`;
-            if (this.get_effect(effect_name))
-                this.remove_effect_by_name(effect_name);
+        try {
+            this.source = null;
+        } catch (_e) {
+            // Ignore if the clone source was already cleared.
         }
-        this._effectCounts = {};
 
         this.remove_highlight(true);
 
@@ -296,17 +348,17 @@ export const Preview = GObject.registerClass({
                 let constraint = Clutter.BindConstraint.new(this, Clutter.BindCoordinate.ALL, 0);
                 this._highlight.add_constraint(constraint);
 
-                this.bind_property('rotation_angle_y', this._highlight, 'rotation_angle_y',
+                this._trackBindProperty('rotation_angle_y', this._highlight, 'rotation_angle_y',
                     GObject.BindingFlags.SYNC_CREATE);
-                this.bind_property('pivot_point', this._highlight, 'pivot_point',
+                this._trackBindProperty('pivot_point', this._highlight, 'pivot_point',
                     GObject.BindingFlags.SYNC_CREATE);
-                this.bind_property('translation_x', this._highlight, 'translation_x',
+                this._trackBindProperty('translation_x', this._highlight, 'translation_x',
                     GObject.BindingFlags.SYNC_CREATE);
-                this.bind_property('scale_x', this._highlight, 'scale_x',
+                this._trackBindProperty('scale_x', this._highlight, 'scale_x',
                     GObject.BindingFlags.SYNC_CREATE);
-                this.bind_property('scale_y', this._highlight, 'scale_y',
+                this._trackBindProperty('scale_y', this._highlight, 'scale_y',
                     GObject.BindingFlags.SYNC_CREATE);
-                this.bind_property('scale_z', this._highlight, 'scale_z',
+                this._trackBindProperty('scale_z', this._highlight, 'scale_z',
                     GObject.BindingFlags.SYNC_CREATE);
                 this.switcher.previewActor.add_child(this._highlight);
                 this.switcher.previewActor.set_child_above_sibling(this._highlight, this);
@@ -323,17 +375,17 @@ export const Preview = GObject.registerClass({
                 this._flash.set_style(this._getHighlightStyle(1));
                 let constraint = Clutter.BindConstraint.new(this, Clutter.BindCoordinate.ALL, 0);
                 this._flash.add_constraint(constraint);
-                this.bind_property('rotation_angle_y', this._flash, 'rotation_angle_y',
+                this._trackBindProperty('rotation_angle_y', this._flash, 'rotation_angle_y',
                     GObject.BindingFlags.SYNC_CREATE);
-                this.bind_property('pivot_point', this._flash, 'pivot_point',
+                this._trackBindProperty('pivot_point', this._flash, 'pivot_point',
                     GObject.BindingFlags.SYNC_CREATE);
-                this.bind_property('translation_x', this._flash, 'translation_x',
+                this._trackBindProperty('translation_x', this._flash, 'translation_x',
                     GObject.BindingFlags.SYNC_CREATE);
-                this.bind_property('scale_x', this._flash, 'scale_x',
+                this._trackBindProperty('scale_x', this._flash, 'scale_x',
                     GObject.BindingFlags.SYNC_CREATE);
-                this.bind_property('scale_y', this._flash, 'scale_y',
+                this._trackBindProperty('scale_y', this._flash, 'scale_y',
                     GObject.BindingFlags.SYNC_CREATE);
-                this.bind_property('scale_z', this._flash, 'scale_z',
+                this._trackBindProperty('scale_z', this._flash, 'scale_z',
                     GObject.BindingFlags.SYNC_CREATE);
                 this.switcher.previewActor.add_child(this._flash);
                 this.switcher.previewActor.set_child_above_sibling(this._flash, this._highlight);
@@ -389,17 +441,17 @@ export const Preview = GObject.registerClass({
             this._icon.set_scale(this.switcher._iconScaleUpDown ? 0 : scale, this.switcher._iconScaleUpDown ? 0 : scale);
             this._icon.opacity = 255 * this.switcher._settings.overlay_icon_opacity;
 
-            this.bind_property('rotation_angle_y', this._application_icon_box, 'rotation_angle_y',
+            this._trackBindProperty('rotation_angle_y', this._application_icon_box, 'rotation_angle_y',
                 GObject.BindingFlags.SYNC_CREATE);
-            this.bind_property('pivot_point', this._application_icon_box, 'pivot_point',
+            this._trackBindProperty('pivot_point', this._application_icon_box, 'pivot_point',
                 GObject.BindingFlags.SYNC_CREATE);
-            this.bind_property('translation_x', this._application_icon_box, 'translation_x',
+            this._trackBindProperty('translation_x', this._application_icon_box, 'translation_x',
                 GObject.BindingFlags.SYNC_CREATE);
-            this.bind_property('scale_x', this._application_icon_box, 'scale_x',
+            this._trackBindProperty('scale_x', this._application_icon_box, 'scale_x',
                 GObject.BindingFlags.SYNC_CREATE);
-            this.bind_property('scale_y', this._application_icon_box, 'scale_y',
+            this._trackBindProperty('scale_y', this._application_icon_box, 'scale_y',
                 GObject.BindingFlags.SYNC_CREATE);
-            this.bind_property('scale_z', this._application_icon_box, 'scale_z',
+            this._trackBindProperty('scale_z', this._application_icon_box, 'scale_z',
                 GObject.BindingFlags.SYNC_CREATE);
             this.switcher.previewActor.add_child(this._application_icon_box);
 
@@ -418,7 +470,7 @@ export const Preview = GObject.registerClass({
                 time: this.switcher._getRandomTime(),
                 onComplete:  () => {
                     if (this._destroying || this._application_icon_box === null) return;
-                    this.bind_property('opacity', this._application_icon_box, 'opacity',
+                    this._trackBindProperty('opacity', this._application_icon_box, 'opacity',
                         GObject.BindingFlags.DEFAULT);
                 }
             });
