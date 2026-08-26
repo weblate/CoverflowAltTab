@@ -80,7 +80,7 @@ export const Preview = GObject.registerClass({
         for (let binding of this._bindings) {
             try {
                 binding.unbind();
-            } catch (_e) {
+            } catch {
                 // Binding may already be gone if the target was destroyed.
             }
         }
@@ -306,7 +306,7 @@ export const Preview = GObject.registerClass({
 
         try {
             this.source = null;
-        } catch (_e) {
+        } catch {
             // Ignore if the clone source was already cleared.
         }
 

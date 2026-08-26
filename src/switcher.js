@@ -1627,7 +1627,7 @@ export class Switcher {
             for (let fb of this._perspectiveMatrixPushed.values()) {
                 try {
                     fb.pop_matrix();
-                } catch (_e) {
+                } catch {
                     // Stack may already be cleared by the compositor.
                 }
             }
