@@ -651,7 +651,18 @@ export class PlatformGnomeShell extends AbstractPlatform {
     }
 
     removeBackground() {
-        this._backgroundGroup.destroy();
+        // Always restore Dash to Dock here. dimBackground() may have disabled
+        // intellihide / set _ignoreHover and animated the dock out; if the
+        // switcher is destroyed without lightenBackground() finishing (crash,
+        // early destroy, Esc before animations complete), the dock otherwise
+        // stays invisible for the rest of the session.
+        this._setDashToDockVisibility(SwitcherVisibility.HIDING);
+        this._setDashToDockVisibility(SwitcherVisibility.HIDDEN);
+
+        if (this._backgroundGroup)
+            this._backgroundGroup.destroy();
+        this._backgroundGroup = null;
+        this._backgroundShade = null;
     }
 
     /**
