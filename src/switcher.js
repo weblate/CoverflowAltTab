@@ -82,6 +82,9 @@ export class Switcher {
         this._dBus = dBus;
         this._fromIndex = currentIndex;
         this._toIndex = currentIndex;
+        this._windowToActivate = null;
+        this._hiddenWindowActors = [];
+        this._hiddenWindowActorSignals = [];
         this._destroyed = false;
         this._stageBeforeUpdateID = 0;
         this._stageAfterUpdateID = 0;
@@ -222,11 +225,13 @@ export class Switcher {
         // on the current workspace as non-interactive ghosts on GNOME 48+.
         if (this._parent === null) {
             let currentWorkspace = this._manager.workspace_manager.get_active_workspace();
+            this._hiddenWindowActors = [];
             for (let child of global.window_group.get_children()) {
                 if (child !== global.window_group.get_first_child()
                     && typeof child.get_meta_window === "function"
                     && child.get_meta_window().get_workspace() === currentWorkspace) {
                     child.hide();
+                    this._hiddenWindowActors.push(child);
                 }
             }
         }
@@ -1009,6 +1014,9 @@ export class Switcher {
         if (this._destroyed || this._windows === null)
             return;
         this._logger.debug('_windowDestroyed')
+        // A destroyed actor must not be revisited by the teardown restore loop.
+        this._hiddenWindowActors = this._hiddenWindowActors.filter(
+            windowActor => windowActor !== actor);
         this._removeDestroyedWindow(actor.meta_window);
     }
 
@@ -1071,10 +1079,44 @@ export class Switcher {
 
     _activateWithoutSelection() {
         this._currentIndex = -1;
+        this._windowToActivate = null;
         if (this._parent !== null) {
             this._parent.animateClosed(CloseReason.NO_ACTIVATION);
         }
         this.animateClosed(CloseReason.ACTIVATE_SELECTED);
+    }
+
+    /**
+     * Keep real window actors hidden for the whole close animation. Activating
+     * or unminimizing a window otherwise maps it at its final rect while the
+     * Coverflow preview is still easing there.
+     */
+    _pinWindowActorsHidden() {
+        if (this._parent !== null || !this._hiddenWindowActors)
+            return;
+
+        this._unpinWindowActorsHidden();
+        for (let actor of this._hiddenWindowActors) {
+            if (!actor)
+                continue;
+            actor.hide();
+            let id = actor.connect('notify::visible', () => {
+                if (!this._destroyed && this._animatingClosed && actor.visible)
+                    actor.hide();
+            });
+            this._hiddenWindowActorSignals.push([actor, id]);
+        }
+    }
+
+    _unpinWindowActorsHidden() {
+        for (let [actor, id] of this._hiddenWindowActorSignals) {
+            try {
+                actor.disconnect(id);
+            } catch {
+                // Actor may already be destroyed.
+            }
+        }
+        this._hiddenWindowActorSignals = [];
     }
 
     _activateSelected(reset_current_window_title) {
@@ -1087,7 +1129,11 @@ export class Switcher {
         }
         let win = this._windows[this._currentIndex];
         if (win) {
-            this._manager.activateSelectedWindow(win);
+            // Defer activation until the root switcher destroy() so
+            // Main.activateWindow cannot re-show the real window actor while
+            // previews are still easing into place.
+            let root = this._parent !== null ? this._parent : this;
+            root._windowToActivate = win;
             if (reset_current_window_title) this._updateWindowTitle();
         }
         if (this._parent) {
@@ -1196,6 +1242,28 @@ export class Switcher {
             this._haveModal = false;
         }
 
+        // Reveal the selected window under Coverflow before tearing down any
+        // previews (including app sub-switchers that own the selected clone).
+        if (this._parent === null) {
+            this._unpinWindowActorsHidden();
+
+            let winToActivate = this._windowToActivate;
+            this._windowToActivate = null;
+            if (winToActivate)
+                this._manager.activateSelectedWindowInstant(winToActivate);
+
+            for (let child of this._hiddenWindowActors) {
+                if (!child)
+                    continue;
+                if (typeof child.get_meta_window === "function") {
+                    let metaWin = child.get_meta_window();
+                    if (metaWin !== null && !metaWin.minimized)
+                        child.show();
+                }
+            }
+            this._hiddenWindowActors = [];
+        }
+
         if (this._isAppSwitcher) {
             this._logger.log("Destroying Sub-switchers");
             this._logger.increaseIndent();
@@ -1232,20 +1300,10 @@ export class Switcher {
         this._destroyingPreview = null;
         this._initialDelayTimeoutId = 0;
 
-        if (this._parent === null) this._manager.platform.removeBackground();
         if (this._parent === null) {
-            let currentWorkspace = this._manager.workspace_manager.get_active_workspace();
-            for (let child of global.window_group.get_children()) {
-                if (typeof child.get_meta_window === "function") {
-                    let metaWin = child.get_meta_window();
-                    // Only re-show windows that belong to the current workspace.
-                    // Re-showing windows from other workspaces is what left them
-                    // ghosting on the current workspace after a switch.
-                    if (!metaWin.minimized && metaWin.get_workspace() === currentWorkspace) {
-                        child.show();
-                    }
-                }
-            }
+            // Restore Dash to Dock after windows are visible again so intellihide
+            // sees the real overlap state instead of an empty desktop.
+            this._manager.platform.removeBackground();
         }
 
         this._disablePerspectiveCorrection();
@@ -1310,11 +1368,17 @@ export class Switcher {
             }
             this._removeBackgroundEffects();
 
-            if (this._parent === null) this._manager.platform.lightenBackground();
+            if (this._parent === null) {
+                this._pinWindowActorsHidden();
+                this._manager.platform.lightenBackground();
+            }
 
             // preview windows
             let currentWorkspace = this._manager.workspace_manager.get_active_workspace();
             if (reason === CloseReason.ACTIVATE_SELECTED) {
+                let activatingWin = this._parent !== null
+                    ? this._parent._windowToActivate
+                    : this._windowToActivate;
                 for (let [i, preview] of this._previews.entries()) {
                     let metaWin = preview.metaWin;
 
@@ -1323,7 +1387,14 @@ export class Switcher {
                         animation_time = this._settings.animation_time;
                     }
                     preview.removeIcon(animation_time);
-                    if (!metaWin.minimized && metaWin.get_workspace() === currentWorkspace) {
+                    // Ease the selected window (including minimized) to its
+                    // resting rect; scale other minimized windows away.
+                    let isActivating = activatingWin !== null
+                        ? metaWin === activatingWin
+                        : i === this._currentIndex;
+                    let easeToRect = metaWin.get_workspace() === currentWorkspace
+                        && (!metaWin.minimized || isActivating);
+                    if (easeToRect) {
                         let rect = metaWin.get_buffer_rect();
                         this._manager.platform.tween(preview, {
                             x: rect.x - this.actor.x,
