@@ -562,16 +562,26 @@ export class PlatformGnomeShell extends AbstractPlatform {
         }
     }
 
+    _panelOffscreenTranslationY(panelActor) {
+        // Top-half panels slide up; bottom-half panels (e.g. overview dash) slide down.
+        let [, y] = panelActor.get_transformed_position();
+        let height = panelActor.height;
+        if (y + height / 2 < global.stage.height / 2)
+            return -height;
+        return height;
+    }
+
     hidePanels() {
         let panels = this.getPanels();
         for (let panel of panels) {
             try {
                 let panelActor = (panel instanceof Clutter.Actor) ? panel : panel.actor;
                 panelActor.set_reactive(false);
+                this.removeTweens(panelActor);
                 this.tween(panelActor, {
-                    opacity: 0,
+                    translation_y: this._panelOffscreenTranslationY(panelActor),
                     time: this._settings.animation_time,
-                    transition: 'easeInOutQuint'
+                    transition: 'easeOutQuad'
                 });
             } catch (e) {
                 this._logger.error(e);
@@ -618,9 +628,9 @@ export class PlatformGnomeShell extends AbstractPlatform {
                 if (this._settings.hide_panel) {
                     this.removeTweens(panelActor);
                     this.tween(panelActor, {
-                        opacity: 255,
+                        translation_y: 0,
                         time: time,
-                        transition: 'easeInOutQuint'
+                        transition: 'easeOutQuad'
                     });
                 }
             } catch (e) {
@@ -658,6 +668,11 @@ export class PlatformGnomeShell extends AbstractPlatform {
         // stays invisible for the rest of the session.
         this._setDashToDockVisibility(SwitcherVisibility.HIDING);
         this._setDashToDockVisibility(SwitcherVisibility.HIDDEN);
+
+        // Same for panels: snap them back onscreen if hidePanels() left them
+        // translated off the stage without a completed showPanels() animation.
+        if (this._settings.hide_panel)
+            this.showPanels(0);
 
         if (this._backgroundGroup)
             this._backgroundGroup.destroy();
